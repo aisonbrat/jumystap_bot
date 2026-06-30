@@ -8,10 +8,17 @@ load_dotenv()
 log = logging.getLogger(__name__)
 
 # ── Required ─────────────────────────────────────────────────────────────────
-BOT_TOKEN: str = os.environ.get("BOT_TOKEN", "")
+def _clean_env(key: str, default: str = "") -> str:
+    value = os.environ.get(key, default).strip().strip('"').strip("'")
+    return value
 
-# Supabase PostgreSQL connection pooler URI (port 6543, ?pgbouncer=true).
-DATABASE_URL: str = os.environ.get("DATABASE_URL", "")
+
+BOT_TOKEN: str = _clean_env("BOT_TOKEN")
+
+# Supabase pooler URI — port 6543, add ?pgbouncer=true if missing
+DATABASE_URL: str = _clean_env("DATABASE_URL")
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
 BOT_PASSWORD: str = os.environ.get("BOT_PASSWORD", "Gorifa10")

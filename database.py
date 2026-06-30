@@ -6,6 +6,8 @@ for serverless — Settings → Database → Connection string → URI → "Tran
 """
 import json
 import logging
+import os
+import ssl
 import time
 from typing import Any, Dict, Optional, Tuple
 
@@ -43,6 +45,20 @@ INSERT INTO bot_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 """
 
 
+def _pool_kwargs() -> Dict[str, Any]:
+    kwargs: Dict[str, Any] = {
+        "min_size": 1,
+        "max_size": 2,
+        "command_timeout": 15,
+        "statement_cache_size": 0,
+        "timeout": 10,
+    }
+    # Supabase (and most cloud Postgres) requires TLS on Vercel
+    if DATABASE_URL and "sslmode=disable" not in DATABASE_URL:
+        kwargs["ssl"] = ssl.create_default_context()
+    return kwargs
+
+
 async def get_pool() -> asyncpg.Pool:
     global _pool
     if _pool is not None and getattr(_pool, "_closed", False):
@@ -53,13 +69,7 @@ async def get_pool() -> asyncpg.Pool:
                 "DATABASE_URL is not set. "
                 "Add your Supabase connection pooler URI to .env / Vercel env vars."
             )
-        _pool = await asyncpg.create_pool(
-            DATABASE_URL,
-            min_size=1,
-            max_size=2,
-            command_timeout=15,
-            statement_cache_size=0,  # required for Supabase transaction pooler
-        )
+        _pool = await asyncpg.create_pool(DATABASE_URL, **_pool_kwargs())
         await init_schema(_pool)
         log.info("PostgreSQL connection pool ready.")
     return _pool
@@ -72,10 +82,14 @@ async def init_schema(pool: asyncpg.Pool) -> None:
 
 async def close_pool() -> None:
     global _pool
-    if _pool is not None:
+    if _pool is None:
+        return
+    try:
         await _pool.close()
+    except Exception:
+        log.exception("Error closing PostgreSQL pool.")
+    finally:
         _pool = None
-        log.info("PostgreSQL connection pool closed.")
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────

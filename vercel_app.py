@@ -37,6 +37,13 @@ def _get_header(headers: Dict[str, str], name: str) -> Optional[str]:
     return None
 
 
+async def _safe_reset_runtime() -> None:
+    try:
+        await reset_runtime()
+    except Exception:
+        log.exception("Failed to reset runtime after request.")
+
+
 async def process_webhook(
     body: bytes,
     headers: Optional[Dict[str, str]] = None,
@@ -48,6 +55,7 @@ async def process_webhook(
         log.warning("Rejected webhook: invalid secret token.")
         return 403, {"error": "forbidden"}
 
+    status, response = 200, {"ok": True}
     try:
         dp = await get_dispatcher()
         payload = json.loads(body.decode("utf-8"))
@@ -55,18 +63,13 @@ async def process_webhook(
         async with create_bot() as bot:
             update = Update.model_validate(payload, context={"bot": bot})
             await dp.feed_update(bot, update)
-    except Exception:
-        log.exception("Failed to process Telegram update.")
-        return 500, {"error": "internal server error"}
+    except Exception as exc:
+        log.exception("Failed to process Telegram update: %s", exc)
+        status, response = 500, {"error": "internal server error"}
     finally:
-        # asyncio.run() closes the loop — must not keep pool/lock across requests
-        await reset_runtime()
+        await _safe_reset_runtime()
 
-    return 200, {"ok": True}
-
-
-async def _run_webhook(body: bytes, headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
-    return await process_webhook(body, headers)
+    return status, response
 
 
 def handle_http(method: str, path: str, body: bytes, headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
@@ -81,7 +84,7 @@ def handle_http(method: str, path: str, body: bytes, headers: Dict[str, str]) ->
 
     if method == "POST":
         if norm in POST_PATHS:
-            return asyncio.run(_run_webhook(body, headers))
+            return asyncio.run(process_webhook(body, headers))
         return 404, {"error": "not found"}
 
     return 405, {"error": "method not allowed"}
