@@ -1,12 +1,13 @@
 """
 Bot factory, webhook setup, and local long-polling entry point.
 
-Production (Vercel):  api/index.py imports create_bot_and_dispatcher() + setup_webhook().
+Production (Vercel):  api/index.py uses get_dispatcher() + per-request Bot.
 Local development:    python bot.py
 """
 import asyncio
 import logging
 import os
+from typing import Optional
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
@@ -28,6 +29,9 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 log = logging.getLogger(__name__)
+
+_dispatcher: Optional[Dispatcher] = None
+_dispatcher_lock = asyncio.Lock()
 
 
 # ── Bot commands ──────────────────────────────────────────────────────────────
@@ -99,21 +103,9 @@ async def _cmd_logout(message: Message, state: FSMContext) -> None:
     )
 
 
-# ── Shared factory (used by polling and webhook) ─────────────────────────────
+# ── Dispatcher wiring ────────────────────────────────────────────────────────
 
-async def create_bot_and_dispatcher():
-    if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN environment variable is not set.")
-
-    pool = await get_pool()
-    await db_seed_settings_from_json()
-
-    bot = Bot(
-        token=BOT_TOKEN,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-    )
-    dp = Dispatcher(storage=PostgreSQLStorage(pool))
-
+def _wire_dispatcher(dp: Dispatcher) -> None:
     dp.message.outer_middleware(AuthMiddleware())
     dp.callback_query.outer_middleware(AuthMiddleware())
 
@@ -124,11 +116,39 @@ async def create_bot_and_dispatcher():
     dp.include_router(settings_panel.router)
     dp.include_router(post.router)
 
+
+def create_bot() -> Bot:
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN environment variable is not set.")
+    return Bot(
+        token=BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
+
+
+async def get_dispatcher() -> Dispatcher:
+    """Singleton dispatcher — safe to reuse across serverless invocations."""
+    global _dispatcher
+    async with _dispatcher_lock:
+        if _dispatcher is None:
+            pool = await get_pool()
+            await db_seed_settings_from_json()
+            dp = Dispatcher(storage=PostgreSQLStorage(pool))
+            _wire_dispatcher(dp)
+            _dispatcher = dp
+            log.info("Dispatcher initialized.")
+    return _dispatcher
+
+
+async def create_bot_and_dispatcher():
+    """Persistent bot + dispatcher — used for local long-polling."""
+    bot = create_bot()
+    dp = await get_dispatcher()
     return bot, dp
 
 
 async def setup_webhook(bot: Bot) -> None:
-    """Register the webhook URL with Telegram (called on Vercel cold start)."""
+    """Register the webhook URL with Telegram."""
     from config import WEBHOOK_SECRET
 
     url = get_webhook_url()
@@ -136,7 +156,7 @@ async def setup_webhook(bot: Bot) -> None:
         url=url,
         secret_token=WEBHOOK_SECRET or None,
         allowed_updates=["message", "callback_query"],
-        drop_pending_updates=True,
+        drop_pending_updates=False,
     )
     await _set_commands(bot)
     log.info("Webhook set to %s", url)
@@ -160,6 +180,7 @@ async def main() -> None:
             allowed_updates=["message", "callback_query"],
         )
     finally:
+        await bot.session.close()
         await close_pool()
 
 
