@@ -1,8 +1,11 @@
+import logging
 import os
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+log = logging.getLogger(__name__)
 
 # ── Required ─────────────────────────────────────────────────────────────────
 BOT_TOKEN: str = os.environ.get("BOT_TOKEN", "")
@@ -14,11 +17,9 @@ DATABASE_URL: str = os.environ.get("DATABASE_URL", "")
 BOT_PASSWORD: str = os.environ.get("BOT_PASSWORD", "Gorifa10")
 
 # ── Webhook (Vercel / production) ────────────────────────────────────────────
-# Optional secret sent in X-Telegram-Bot-Api-Secret-Token header
 WEBHOOK_SECRET: str = os.environ.get("WEBHOOK_SECRET", "")
 
-# Override the public base URL (e.g. https://my-bot.vercel.app).
-# When unset, VERCEL_URL is used automatically on Vercel.
+# Stable production URL, e.g. https://jumystapbot.vercel.app
 WEBHOOK_BASE_URL: str = os.environ.get("WEBHOOK_BASE_URL", "")
 
 
@@ -29,14 +30,15 @@ def get_webhook_url() -> str:
         prod = os.environ.get("VERCEL_PROJECT_PRODUCTION_URL", "")
         if prod:
             base = f"https://{prod}"
-    if not base and os.environ.get("VERCEL"):
-        raise RuntimeError(
-            "WEBHOOK_BASE_URL is not set. "
-            "Add it in Vercel env vars, e.g. https://jumystapbot.vercel.app"
-        )
     if not base:
         vercel_url = os.environ.get("VERCEL_URL", "")
         if vercel_url:
+            if os.environ.get("VERCEL") and not WEBHOOK_BASE_URL:
+                log.warning(
+                    "WEBHOOK_BASE_URL not set — using preview URL %s. "
+                    "Set WEBHOOK_BASE_URL=https://jumystapbot.vercel.app",
+                    vercel_url,
+                )
             base = f"https://{vercel_url}"
     if not base:
         host = os.environ.get("WEBHOOK_HOST", "localhost")

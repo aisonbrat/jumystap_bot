@@ -1,7 +1,19 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "version": 2,
+  "builds": [
+    {
+      "src": "api/index.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    { "src": "/api/webhook", "dest": "api/index.py" },
+    { "src": "/api/health", "dest": "api/index.py" },
+    { "src": "/api", "dest": "api/index.py" }
+  ],
   "functions": {
-    "api/**/*.py": {
+    "api/index.py": {
       "maxDuration": 30
     }
   }
