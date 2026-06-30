@@ -1,48 +1,40 @@
 """
-Single Vercel entry point for all /api/* traffic.
+Vercel serverless function — https://<domain>/api
 
-Vercel forwards the FULL path (e.g. /api/health) to FastAPI,
-so every route must be registered with the complete path.
+Uses BaseHTTPRequestHandler (official Vercel Python pattern).
+Do NOT use FastAPI here — it is unreliable on @vercel/python.
 """
+import json
 import sys
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Optional
 
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from fastapi import FastAPI, Header, Request, Response
-from fastapi.responses import JSONResponse
-
-from vercel_app import health_response, process_webhook
-
-app = FastAPI()
-
-# Every path Vercel / Telegram may hit
-_GET_PATHS = ("/", "/api", "/api/", "/api/health", "/api/webhook", "/health")
-_POST_PATHS = ("/", "/api", "/api/", "/api/webhook", "/webhook")
+from vercel_app import handle_http
 
 
-def _register(method: str, paths: tuple, handler) -> None:
-    for path in paths:
-        app.add_api_route(path, handler, methods=[method])
+class handler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        status, payload = handle_http("GET", self.path, b"", dict(self.headers))
+        self._send_json(status, payload)
 
+    def do_POST(self) -> None:
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length) if length else b""
+        status, payload = handle_http("POST", self.path, body, dict(self.headers))
+        self._send_json(status, payload)
 
-async def health() -> dict:
-    return health_response()
+    def log_message(self, fmt: str, *args) -> None:
+        # Log to Vercel runtime logs
+        sys.stderr.write("%s - [%s] %s\n" % (self.address_string(), self.log_date_time_string(), fmt % args))
 
-
-async def webhook(
-    request: Request,
-    x_telegram_bot_api_secret_token: Optional[str] = Header(default=None),
-) -> Response:
-    headers = dict(request.headers)
-    if x_telegram_bot_api_secret_token:
-        headers["x-telegram-bot-api-secret-token"] = x_telegram_bot_api_secret_token
-    status, body = await process_webhook(await request.body(), headers)
-    return JSONResponse(content=body, status_code=status)
-
-
-_register("GET", _GET_PATHS, health)
-_register("POST", _POST_PATHS, webhook)
+    def _send_json(self, status: int, payload: dict) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
