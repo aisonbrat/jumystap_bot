@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from aiogram.types import Update
 
-from bot import create_bot, get_dispatcher
+from bot import create_bot, get_dispatcher, reset_runtime
 from config import WEBHOOK_SECRET
 
 logging.basicConfig(
@@ -17,23 +17,8 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-_webhook_registered = False
-_webhook_lock = asyncio.Lock()
-
 GET_PATHS = {"/", "/api", "/api/", "/api/health", "/api/health/", "/health"}
 POST_PATHS = {"/", "/api", "/api/", "/api/webhook", "/api/webhook/", "/webhook"}
-
-
-async def ensure_webhook() -> None:
-    """Optional — only if you want auto re-register on cold start."""
-    global _webhook_registered
-    async with _webhook_lock:
-        if _webhook_registered:
-            return
-        from bot import setup_webhook
-        async with create_bot() as bot:
-            await setup_webhook(bot)
-        _webhook_registered = True
 
 
 def health_response() -> Dict[str, str]:
@@ -73,8 +58,15 @@ async def process_webhook(
     except Exception:
         log.exception("Failed to process Telegram update.")
         return 500, {"error": "internal server error"}
+    finally:
+        # asyncio.run() closes the loop — must not keep pool/lock across requests
+        await reset_runtime()
 
     return 200, {"ok": True}
+
+
+async def _run_webhook(body: bytes, headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
+    return await process_webhook(body, headers)
 
 
 def handle_http(method: str, path: str, body: bytes, headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
@@ -83,14 +75,13 @@ def handle_http(method: str, path: str, body: bytes, headers: Dict[str, str]) ->
     log.info("%s %s (normalized: %s)", method, path, norm)
 
     if method == "GET":
-        # Accept /api/health with or without trailing slash
-        if norm in GET_PATHS or norm == "/api/health":
+        if norm in GET_PATHS:
             return 200, health_response()
         return 404, {"error": "not found"}
 
     if method == "POST":
-        if norm in POST_PATHS or norm == "/api":
-            return asyncio.run(process_webhook(body, headers))
+        if norm in POST_PATHS:
+            return asyncio.run(_run_webhook(body, headers))
         return 404, {"error": "not found"}
 
     return 405, {"error": "method not allowed"}

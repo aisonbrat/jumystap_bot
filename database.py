@@ -45,6 +45,8 @@ INSERT INTO bot_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 
 async def get_pool() -> asyncpg.Pool:
     global _pool
+    if _pool is not None and getattr(_pool, "_closed", False):
+        _pool = None
     if _pool is None:
         if not DATABASE_URL:
             raise RuntimeError(
@@ -54,8 +56,8 @@ async def get_pool() -> asyncpg.Pool:
         _pool = await asyncpg.create_pool(
             DATABASE_URL,
             min_size=1,
-            max_size=5,
-            command_timeout=30,
+            max_size=2,
+            command_timeout=15,
             statement_cache_size=0,  # required for Supabase transaction pooler
         )
         await init_schema(_pool)

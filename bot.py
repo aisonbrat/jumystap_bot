@@ -31,7 +31,22 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 _dispatcher: Optional[Dispatcher] = None
-_dispatcher_lock = asyncio.Lock()
+_dispatcher_lock: Optional[asyncio.Lock] = None
+
+
+def _get_dispatcher_lock() -> asyncio.Lock:
+    global _dispatcher_lock
+    if _dispatcher_lock is None:
+        _dispatcher_lock = asyncio.Lock()
+    return _dispatcher_lock
+
+
+async def reset_runtime() -> None:
+    """Tear down globals after each Vercel request (asyncio.run closes the loop)."""
+    global _dispatcher, _dispatcher_lock
+    _dispatcher = None
+    _dispatcher_lock = None
+    await close_pool()
 
 
 # ── Bot commands ──────────────────────────────────────────────────────────────
@@ -127,9 +142,9 @@ def create_bot() -> Bot:
 
 
 async def get_dispatcher() -> Dispatcher:
-    """Singleton dispatcher — safe to reuse across serverless invocations."""
+    """Build dispatcher for the current event loop (serverless-safe)."""
     global _dispatcher
-    async with _dispatcher_lock:
+    async with _get_dispatcher_lock():
         if _dispatcher is None:
             pool = await get_pool()
             await db_seed_settings_from_json()
