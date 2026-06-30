@@ -24,12 +24,16 @@ WEBHOOK_BASE_URL: str = os.environ.get("WEBHOOK_BASE_URL", "")
 
 def get_webhook_url() -> str:
     """Full Telegram webhook URL (POST target for updates)."""
-    # Always prefer the stable production URL — VERCEL_URL changes on every deploy.
     base = WEBHOOK_BASE_URL.rstrip("/") if WEBHOOK_BASE_URL else ""
     if not base:
         prod = os.environ.get("VERCEL_PROJECT_PRODUCTION_URL", "")
         if prod:
             base = f"https://{prod}"
+    if not base and os.environ.get("VERCEL"):
+        raise RuntimeError(
+            "WEBHOOK_BASE_URL is not set. "
+            "Add it in Vercel env vars, e.g. https://jumystapbot.vercel.app"
+        )
     if not base:
         vercel_url = os.environ.get("VERCEL_URL", "")
         if vercel_url:

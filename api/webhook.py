@@ -1,4 +1,4 @@
-"""GET/POST https://<domain>/api — primary Telegram webhook endpoint."""
+"""GET/POST https://<domain>/api/webhook — alias for Telegram webhook."""
 import sys
 from pathlib import Path
 from typing import Optional
