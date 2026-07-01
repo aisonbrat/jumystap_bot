@@ -13,11 +13,17 @@ def _clean_env(key: str, default: str = "") -> str:
     return value
 
 
+def _ensure_rediss_url(url: str) -> str:
+    if url.startswith("redis://") and not url.startswith("rediss://"):
+        return url.replace("redis://", "rediss://", 1)
+    return url
+
+
 # ── Required ─────────────────────────────────────────────────────────────────
 BOT_TOKEN: str = _clean_env("BOT_TOKEN")
 
-# Upstash Redis URL (TLS), e.g. rediss://default:xxx@xxx.upstash.io:6379
-REDIS_URL: str = _clean_env("REDIS_URL")
+# Upstash Redis URL (TLS) — must start with rediss://
+REDIS_URL: str = _ensure_rediss_url(_clean_env("REDIS_URL"))
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
 BOT_PASSWORD: str = _clean_env("BOT_PASSWORD", "Gorifa10")

@@ -22,6 +22,7 @@ from aiogram.types import BotCommand, Message
 from auth import AuthMiddleware, authenticate, is_authenticated, logout
 from config import BOT_PASSWORD, BOT_TOKEN, REDIS_URL, get_webhook_url
 from database import close_redis, db_seed_settings_from_json
+from redis_client import redis_connection_kwargs
 from handlers import post, settings_panel
 from states import AuthFlow
 from web import start_web_server
@@ -46,7 +47,10 @@ def _get_dispatcher_lock() -> asyncio.Lock:
 
 async def _create_storage() -> BaseStorage:
     if REDIS_URL:
-        return RedisStorage.from_url(REDIS_URL)
+        return RedisStorage.from_url(
+            REDIS_URL,
+            connection_kwargs=redis_connection_kwargs(),
+        )
     log.warning("REDIS_URL not set — using MemoryStorage (local dev only, not for Vercel).")
     return MemoryStorage()
 
