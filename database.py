@@ -11,7 +11,7 @@ from typing import Any, Dict, Optional
 import redis.asyncio as aioredis
 
 from config import REDIS_URL
-from redis_client import redis_connection_kwargs
+from redis_client import redis_connection_kwargs, redis_from_url_kwargs
 
 log = logging.getLogger(__name__)
 
@@ -43,8 +43,7 @@ async def get_redis() -> aioredis.Redis:
             )
         _redis = aioredis.from_url(
             REDIS_URL,
-            decode_responses=True,
-            **redis_connection_kwargs(),
+            **redis_from_url_kwargs(decode_responses=True),
         )
         log.info("Redis connection ready.")
     return _redis

@@ -1,37 +1,28 @@
-"""Redis TLS helpers for Vercel + Upstash."""
-import os
+"""Redis connection helpers for Upstash on Vercel."""
 import ssl
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from config import REDIS_URL
 
 
 def redis_connection_kwargs() -> Dict[str, Any]:
     """
-    Upstash uses rediss:// (TLS). Vercel's Python runtime has no system CA bundle,
-    which causes CERTIFICATE_VERIFY_FAILED unless we pass an explicit SSL context.
+    Upstash uses rediss:// (TLS).
+
+    Do NOT pass ssl=SSLContext here — rediss:// already enables TLS and an extra
+    ssl object breaks redis-py (AbstractConnection.__init__ error on Vercel).
+
+    Vercel has no CA bundle, so disable certificate verification for Upstash TLS.
     """
     if not REDIS_URL.startswith("rediss://"):
         return {}
-
-    ctx = ssl.create_default_context()
-    if os.environ.get("VERCEL"):
-        # Encrypted, but skip CA verify — required on Vercel serverless + Upstash
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-    else:
-        try:
-            import certifi
-            ctx = ssl.create_default_context(cafile=certifi.where())
-        except ImportError:
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-
-    return {"ssl": ctx}
+    return {
+        "ssl_cert_reqs": ssl.CERT_NONE,
+        "ssl_check_hostname": False,
+    }
 
 
-def ensure_rediss_url(url: str) -> str:
-    """Upstash TLS URLs must use rediss:// (note the double s)."""
-    if url.startswith("redis://") and not url.startswith("rediss://"):
-        return url.replace("redis://", "rediss://", 1)
-    return url
+def redis_from_url_kwargs(*, decode_responses: bool) -> Dict[str, Any]:
+    kwargs: Dict[str, Any] = {"decode_responses": decode_responses}
+    kwargs.update(redis_connection_kwargs())
+    return kwargs
