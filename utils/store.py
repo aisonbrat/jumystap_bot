@@ -1,5 +1,5 @@
 """
-Async-safe reader/writer for bot settings stored in PostgreSQL.
+Async-safe reader/writer for bot settings stored in Redis.
 """
 from database import db_get_settings, db_save_settings
 

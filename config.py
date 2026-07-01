@@ -7,27 +7,24 @@ load_dotenv()
 
 log = logging.getLogger(__name__)
 
-# ── Required ─────────────────────────────────────────────────────────────────
+
 def _clean_env(key: str, default: str = "") -> str:
     value = os.environ.get(key, default).strip().strip('"').strip("'")
     return value
 
 
+# ── Required ─────────────────────────────────────────────────────────────────
 BOT_TOKEN: str = _clean_env("BOT_TOKEN")
 
-# Supabase pooler URI — port 6543, add ?pgbouncer=true if missing
-DATABASE_URL: str = _clean_env("DATABASE_URL")
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+# Upstash Redis URL (TLS), e.g. rediss://default:xxx@xxx.upstash.io:6379
+REDIS_URL: str = _clean_env("REDIS_URL")
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
-BOT_PASSWORD: str = os.environ.get("BOT_PASSWORD", "Gorifa10")
+BOT_PASSWORD: str = _clean_env("BOT_PASSWORD", "Gorifa10")
 
 # ── Webhook (Vercel / production) ────────────────────────────────────────────
-WEBHOOK_SECRET: str = os.environ.get("WEBHOOK_SECRET", "")
-
-# Stable production URL, e.g. https://jumystapbot.vercel.app
-WEBHOOK_BASE_URL: str = os.environ.get("WEBHOOK_BASE_URL", "")
+WEBHOOK_SECRET: str = _clean_env("WEBHOOK_SECRET")
+WEBHOOK_BASE_URL: str = _clean_env("WEBHOOK_BASE_URL")
 
 
 def get_webhook_url() -> str:

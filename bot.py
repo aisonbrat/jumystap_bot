@@ -2,7 +2,7 @@
 Bot factory, webhook setup, and local long-polling entry point.
 
 Production (Vercel):  api/index.py uses get_dispatcher() + per-request Bot.
-Local development:    python bot.py
+Local development:    python bot.py  (needs REDIS_URL or uses MemoryStorage)
 """
 import asyncio
 import logging
@@ -14,12 +14,14 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.base import BaseStorage
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.types import BotCommand, Message
 
 from auth import AuthMiddleware, authenticate, is_authenticated, logout
-from config import BOT_PASSWORD, BOT_TOKEN, get_webhook_url
-from database import close_pool, db_seed_settings_from_json, get_pool
-from fsm_storage import PostgreSQLStorage
+from config import BOT_PASSWORD, BOT_TOKEN, REDIS_URL, get_webhook_url
+from database import close_redis, db_seed_settings_from_json
 from handlers import post, settings_panel
 from states import AuthFlow
 from web import start_web_server
@@ -31,6 +33,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 _dispatcher: Optional[Dispatcher] = None
+_storage: Optional[BaseStorage] = None
 _dispatcher_lock: Optional[asyncio.Lock] = None
 
 
@@ -41,12 +44,25 @@ def _get_dispatcher_lock() -> asyncio.Lock:
     return _dispatcher_lock
 
 
+async def _create_storage() -> BaseStorage:
+    if REDIS_URL:
+        return RedisStorage.from_url(REDIS_URL)
+    log.warning("REDIS_URL not set — using MemoryStorage (local dev only, not for Vercel).")
+    return MemoryStorage()
+
+
 async def reset_runtime() -> None:
     """Tear down globals after each Vercel request (asyncio.run closes the loop)."""
-    global _dispatcher, _dispatcher_lock
+    global _dispatcher, _dispatcher_lock, _storage
     _dispatcher = None
     _dispatcher_lock = None
-    await close_pool()
+    if _storage is not None:
+        try:
+            await _storage.close()
+        except Exception:
+            log.exception("Error closing FSM storage.")
+    _storage = None
+    await close_redis()
 
 
 # ── Bot commands ──────────────────────────────────────────────────────────────
@@ -143,12 +159,13 @@ def create_bot() -> Bot:
 
 async def get_dispatcher() -> Dispatcher:
     """Build dispatcher for the current event loop (serverless-safe)."""
-    global _dispatcher
+    global _dispatcher, _storage
     async with _get_dispatcher_lock():
         if _dispatcher is None:
-            pool = await get_pool()
-            await db_seed_settings_from_json()
-            dp = Dispatcher(storage=PostgreSQLStorage(pool))
+            if REDIS_URL:
+                await db_seed_settings_from_json()
+            _storage = await _create_storage()
+            dp = Dispatcher(storage=_storage)
             _wire_dispatcher(dp)
             _dispatcher = dp
             log.info("Dispatcher initialized.")
@@ -196,7 +213,7 @@ async def main() -> None:
         )
     finally:
         await bot.session.close()
-        await close_pool()
+        await reset_runtime()
 
 
 if __name__ == "__main__":

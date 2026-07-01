@@ -1,137 +1,23 @@
 """
-Async PostgreSQL access (Supabase).
+Persistent storage via Redis (Upstash on Vercel, optional locally).
 
-Set DATABASE_URL to the Supabase *connection pooler* URI (port 6543, mode=transaction)
-for serverless — Settings → Database → Connection string → URI → "Transaction pooler".
+Free tier: https://upstash.com — create a database, copy the Redis URL (TLS).
 """
 import json
 import logging
-import os
-import ssl
-import time
-from typing import Any, Dict, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, Optional
 
-import asyncpg
+import redis.asyncio as aioredis
 
-from config import DATABASE_URL
+from config import REDIS_URL
 
 log = logging.getLogger(__name__)
 
-_pool: Optional[asyncpg.Pool] = None
+_redis: Optional[aioredis.Redis] = None
 
-_INIT_SQL = """
-CREATE TABLE IF NOT EXISTS fsm_states (
-    storage_key TEXT PRIMARY KEY,
-    state       TEXT,
-    data        JSONB NOT NULL DEFAULT '{}'::jsonb,
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_fsm_states_updated_at ON fsm_states (updated_at);
-
-CREATE TABLE IF NOT EXISTS authenticated_users (
-    user_id           BIGINT PRIMARY KEY,
-    authenticated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS bot_settings (
-    id                    SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
-    channel_id            TEXT NOT NULL DEFAULT '',
-    footer                TEXT NOT NULL DEFAULT '',
-    permanent_button_text TEXT NOT NULL DEFAULT '',
-    permanent_button_url  TEXT NOT NULL DEFAULT '',
-    updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-INSERT INTO bot_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
-"""
-
-
-def _pool_kwargs() -> Dict[str, Any]:
-    kwargs: Dict[str, Any] = {
-        "min_size": 1,
-        "max_size": 2,
-        "command_timeout": 15,
-        "statement_cache_size": 0,
-        "timeout": 10,
-    }
-    # Supabase (and most cloud Postgres) requires TLS on Vercel
-    if DATABASE_URL and "sslmode=disable" not in DATABASE_URL:
-        kwargs["ssl"] = ssl.create_default_context()
-    return kwargs
-
-
-async def get_pool() -> asyncpg.Pool:
-    global _pool
-    if _pool is not None and getattr(_pool, "_closed", False):
-        _pool = None
-    if _pool is None:
-        if not DATABASE_URL:
-            raise RuntimeError(
-                "DATABASE_URL is not set. "
-                "Add your Supabase connection pooler URI to .env / Vercel env vars."
-            )
-        _pool = await asyncpg.create_pool(DATABASE_URL, **_pool_kwargs())
-        await init_schema(_pool)
-        log.info("PostgreSQL connection pool ready.")
-    return _pool
-
-
-async def init_schema(pool: asyncpg.Pool) -> None:
-    async with pool.acquire() as conn:
-        await conn.execute(_INIT_SQL)
-
-
-async def close_pool() -> None:
-    global _pool
-    if _pool is None:
-        return
-    try:
-        await _pool.close()
-    except Exception:
-        log.exception("Error closing PostgreSQL pool.")
-    finally:
-        _pool = None
-
-
-# ── Auth ──────────────────────────────────────────────────────────────────────
-
-async def db_authenticate(user_id: int) -> None:
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO authenticated_users (user_id)
-            VALUES ($1)
-            ON CONFLICT (user_id) DO UPDATE
-                SET authenticated_at = NOW()
-            """,
-            user_id,
-        )
-
-
-async def db_is_authenticated(user_id: int) -> bool:
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        found = await conn.fetchval(
-            "SELECT 1 FROM authenticated_users WHERE user_id = $1",
-            user_id,
-        )
-    return found is not None
-
-
-async def db_revoke_authentication(user_id: int) -> None:
-    """Optional helper — remove a user from the authenticated list."""
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "DELETE FROM authenticated_users WHERE user_id = $1",
-            user_id,
-        )
-
-
-# ── Settings ──────────────────────────────────────────────────────────────────
-
-_settings_cache: Optional[Tuple[Dict[str, str], float]] = None
-_SETTINGS_TTL_SEC = 60.0
+AUTH_SET_KEY = "bot:authenticated_users"
+SETTINGS_KEY = "bot:settings"
 
 SETTINGS_DEFAULTS: Dict[str, str] = {
     "channel_id": "",
@@ -146,85 +32,86 @@ SETTINGS_DEFAULTS: Dict[str, str] = {
 }
 
 
+async def get_redis() -> aioredis.Redis:
+    global _redis
+    if _redis is None:
+        if not REDIS_URL:
+            raise RuntimeError(
+                "REDIS_URL is not set. "
+                "Create a free Upstash Redis database and add the URL to Vercel env vars."
+            )
+        _redis = aioredis.from_url(REDIS_URL, decode_responses=True)
+        log.info("Redis connection ready.")
+    return _redis
+
+
+async def close_redis() -> None:
+    global _redis
+    if _redis is None:
+        return
+    try:
+        await _redis.aclose()
+    except Exception:
+        log.exception("Error closing Redis connection.")
+    finally:
+        _redis = None
+
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
+async def db_authenticate(user_id: int) -> None:
+    r = await get_redis()
+    await r.sadd(AUTH_SET_KEY, str(user_id))
+
+
+async def db_is_authenticated(user_id: int) -> bool:
+    r = await get_redis()
+    return bool(await r.sismember(AUTH_SET_KEY, str(user_id)))
+
+
+async def db_revoke_authentication(user_id: int) -> None:
+    r = await get_redis()
+    await r.srem(AUTH_SET_KEY, str(user_id))
+
+
+# ── Settings ──────────────────────────────────────────────────────────────────
+
 async def db_get_settings() -> Dict[str, str]:
-    global _settings_cache
-    now = time.monotonic()
-    if _settings_cache and now - _settings_cache[1] < _SETTINGS_TTL_SEC:
-        return dict(_settings_cache[0])
-
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT channel_id, footer, permanent_button_text, permanent_button_url
-            FROM bot_settings
-            WHERE id = 1
-            """,
-        )
-    if row is None:
-        result = dict(SETTINGS_DEFAULTS)
-    else:
-        result = {**SETTINGS_DEFAULTS, **dict(row)}
-
-    _settings_cache = (result, now)
-    return dict(result)
+    r = await get_redis()
+    raw = await r.get(SETTINGS_KEY)
+    if not raw:
+        return dict(SETTINGS_DEFAULTS)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return dict(SETTINGS_DEFAULTS)
+    return {**SETTINGS_DEFAULTS, **data}
 
 
 async def db_save_settings(**fields: Any) -> None:
-    global _settings_cache
-
     allowed = set(SETTINGS_DEFAULTS)
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
         return
-
-    _settings_cache = None
-
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        current = await conn.fetchrow(
-            "SELECT channel_id, footer, permanent_button_text, permanent_button_url "
-            "FROM bot_settings WHERE id = 1",
-        )
-        merged = {**SETTINGS_DEFAULTS, **(dict(current) if current else {})}
-        merged.update(updates)
-
-        await conn.execute(
-            """
-            INSERT INTO bot_settings (
-                id, channel_id, footer, permanent_button_text, permanent_button_url
-            )
-            VALUES (1, $1, $2, $3, $4)
-            ON CONFLICT (id) DO UPDATE SET
-                channel_id            = EXCLUDED.channel_id,
-                footer                = EXCLUDED.footer,
-                permanent_button_text = EXCLUDED.permanent_button_text,
-                permanent_button_url  = EXCLUDED.permanent_button_url,
-                updated_at            = NOW()
-            """,
-            merged["channel_id"],
-            merged["footer"],
-            merged["permanent_button_text"],
-            merged["permanent_button_url"],
-        )
+    current = await db_get_settings()
+    current.update(updates)
+    r = await get_redis()
+    await r.set(SETTINGS_KEY, json.dumps(current, ensure_ascii=False))
 
 
 async def db_seed_settings_from_json(path: str = "settings.json") -> None:
-    """One-time import of local settings.json into the database."""
-    from pathlib import Path
-
+    """Import settings.json into Redis on first run."""
+    r = await get_redis()
+    if await r.exists(SETTINGS_KEY):
+        return
     p = Path(path)
     if not p.exists():
+        await db_save_settings(**SETTINGS_DEFAULTS)
         return
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
-        log.warning("Could not read %s for DB seed.", path)
+        await db_save_settings(**SETTINGS_DEFAULTS)
         return
-
-    current = await db_get_settings()
-    if current.get("channel_id"):
-        return
-
     await db_save_settings(**data)
-    log.info("Seeded bot_settings from %s", path)
+    log.info("Seeded Redis settings from %s", path)

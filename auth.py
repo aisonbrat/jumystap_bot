@@ -1,7 +1,5 @@
 """
-Password-based authentication persisted in PostgreSQL.
-
-Uses an outer middleware so auth is enforced before any handler runs.
+Password-based authentication persisted in Redis.
 """
 from typing import Any, Awaitable, Callable, Dict
 
