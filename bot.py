@@ -1,8 +1,5 @@
 """
 Bot factory, webhook setup, and local long-polling entry point.
-
-Production (Vercel):  api/index.py uses get_dispatcher() + per-request Bot.
-Local development:    python bot.py  (needs REDIS_URL or uses MemoryStorage)
 """
 import asyncio
 import logging
@@ -16,15 +13,14 @@ from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import BaseStorage
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.types import BotCommand, Message
 
 from auth import AuthMiddleware, authenticate, is_authenticated, logout
-from config import BOT_PASSWORD, BOT_TOKEN, REDIS_URL, get_webhook_url
-from database import close_redis, db_seed_settings_from_json
-from redis_client import redis_connection_kwargs
+from config import BOT_PASSWORD, BOT_TOKEN, get_webhook_url, upstash_configured
+from database import close_redis, db_seed_settings_from_json, get_redis
 from handlers import post, settings_panel
 from states import AuthFlow
+from upstash_storage import UpstashStorage
 from web import start_web_server
 
 logging.basicConfig(
@@ -46,25 +42,17 @@ def _get_dispatcher_lock() -> asyncio.Lock:
 
 
 async def _create_storage() -> BaseStorage:
-    if REDIS_URL:
-        return RedisStorage.from_url(
-            REDIS_URL,
-            connection_kwargs=redis_connection_kwargs(),
-        )
-    log.warning("REDIS_URL not set — using MemoryStorage (local dev only, not for Vercel).")
+    if upstash_configured():
+        return UpstashStorage(get_redis())
+    log.warning("Upstash not configured — using MemoryStorage (local dev only).")
     return MemoryStorage()
 
 
 async def reset_runtime() -> None:
-    """Tear down globals after each Vercel request (asyncio.run closes the loop)."""
+    """Reset per-request globals (safe with asyncio.run on Vercel)."""
     global _dispatcher, _dispatcher_lock, _storage
     _dispatcher = None
     _dispatcher_lock = None
-    if _storage is not None:
-        try:
-            await _storage.close()
-        except Exception:
-            log.exception("Error closing FSM storage.")
     _storage = None
     await close_redis()
 
@@ -162,11 +150,10 @@ def create_bot() -> Bot:
 
 
 async def get_dispatcher() -> Dispatcher:
-    """Build dispatcher for the current event loop (serverless-safe)."""
     global _dispatcher, _storage
     async with _get_dispatcher_lock():
         if _dispatcher is None:
-            if REDIS_URL:
+            if upstash_configured():
                 await db_seed_settings_from_json()
             _storage = await _create_storage()
             dp = Dispatcher(storage=_storage)
@@ -177,14 +164,12 @@ async def get_dispatcher() -> Dispatcher:
 
 
 async def create_bot_and_dispatcher():
-    """Persistent bot + dispatcher — used for local long-polling."""
     bot = create_bot()
     dp = await get_dispatcher()
     return bot, dp
 
 
 async def setup_webhook(bot: Bot) -> None:
-    """Register the webhook URL with Telegram."""
     from config import WEBHOOK_SECRET
 
     url = get_webhook_url()
@@ -197,8 +182,6 @@ async def setup_webhook(bot: Bot) -> None:
     await _set_commands(bot)
     log.info("Webhook set to %s", url)
 
-
-# ── Local long-polling ────────────────────────────────────────────────────────
 
 async def main() -> None:
     bot, dp = await create_bot_and_dispatcher()

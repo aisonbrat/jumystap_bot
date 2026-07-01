@@ -9,7 +9,8 @@ from typing import Any, Dict, Optional, Tuple
 from aiogram.types import Update
 
 from bot import create_bot, get_dispatcher, reset_runtime
-from config import WEBHOOK_SECRET
+from config import WEBHOOK_SECRET, upstash_config_error
+from database import ping_redis
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,8 +22,20 @@ GET_PATHS = {"/", "/api", "/api/", "/api/health", "/api/health/", "/health"}
 POST_PATHS = {"/", "/api", "/api/", "/api/webhook", "/api/webhook/", "/webhook"}
 
 
-def health_response() -> Dict[str, str]:
-    return {"status": "ok"}
+async def health_response() -> Dict[str, Any]:
+    body: Dict[str, Any] = {"status": "ok"}
+    config_error = upstash_config_error()
+    if config_error:
+        body["status"] = "misconfigured"
+        body["redis"] = config_error
+        return body
+    try:
+        body["redis"] = "ok" if await ping_redis() else "fail"
+    except Exception as exc:
+        log.exception("Redis health check failed.")
+        body["status"] = "error"
+        body["redis"] = f"error: {exc}"
+    return body
 
 
 def _normalize_path(path: str) -> str:
@@ -73,13 +86,12 @@ async def process_webhook(
 
 
 def handle_http(method: str, path: str, body: bytes, headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
-    """Sync entry for Vercel BaseHTTPRequestHandler."""
     norm = _normalize_path(path)
     log.info("%s %s (normalized: %s)", method, path, norm)
 
     if method == "GET":
         if norm in GET_PATHS:
-            return 200, health_response()
+            return 200, asyncio.run(health_response())
         return 404, {"error": "not found"}
 
     if method == "POST":

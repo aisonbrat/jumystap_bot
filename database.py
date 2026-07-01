@@ -1,21 +1,22 @@
 """
-Persistent storage via Redis (Upstash on Vercel, optional locally).
+Upstash Redis via HTTPS REST API (works on Vercel — no TCP/SSL issues).
 
-Free tier: https://upstash.com — create a database, copy the Redis URL (TLS).
+In Upstash console → your database → REST API tab, copy:
+  UPSTASH_REDIS_REST_URL
+  UPSTASH_REDIS_REST_TOKEN
 """
 import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-import redis.asyncio as aioredis
+from upstash_redis.asyncio import Redis
 
-from config import REDIS_URL
-from redis_client import redis_connection_kwargs, redis_from_url_kwargs
+from config import UPSTASH_REDIS_REST_TOKEN, UPSTASH_REDIS_REST_URL, upstash_config_error
 
 log = logging.getLogger(__name__)
 
-_redis: Optional[aioredis.Redis] = None
+_redis: Optional[Redis] = None
 
 AUTH_SET_KEY = "bot:authenticated_users"
 SETTINGS_KEY = "bot:settings"
@@ -33,55 +34,67 @@ SETTINGS_DEFAULTS: Dict[str, str] = {
 }
 
 
-async def get_redis() -> aioredis.Redis:
+def get_redis() -> Redis:
     global _redis
     if _redis is None:
-        if not REDIS_URL:
-            raise RuntimeError(
-                "REDIS_URL is not set. "
-                "Create a free Upstash Redis database and add the URL to Vercel env vars."
-            )
-        _redis = aioredis.from_url(
-            REDIS_URL,
-            **redis_from_url_kwargs(decode_responses=True),
-        )
-        log.info("Redis connection ready.")
+        err = upstash_config_error()
+        if err:
+            raise RuntimeError(err)
+        _redis = Redis(url=UPSTASH_REDIS_REST_URL, token=UPSTASH_REDIS_REST_TOKEN)
+        log.info("Upstash Redis REST client ready.")
     return _redis
 
 
 async def close_redis() -> None:
     global _redis
-    if _redis is None:
-        return
+    _redis = None
+
+
+async def ping_redis() -> bool:
+    r = get_redis()
+    result = await r.ping()
+    return result == "PONG" or result is True
+
+
+# ── Auth (stored as JSON list — REST has no native sets in all plans) ────────
+
+async def _get_auth_users() -> set:
+    r = get_redis()
+    raw = await r.get(AUTH_SET_KEY)
+    if not raw:
+        return set()
     try:
-        await _redis.aclose()
-    except Exception:
-        log.exception("Error closing Redis connection.")
-    finally:
-        _redis = None
+        return set(json.loads(raw))
+    except json.JSONDecodeError:
+        return set()
 
 
-# ── Auth ──────────────────────────────────────────────────────────────────────
+async def _save_auth_users(users: set) -> None:
+    r = get_redis()
+    await r.set(AUTH_SET_KEY, json.dumps(list(users)))
+
 
 async def db_authenticate(user_id: int) -> None:
-    r = await get_redis()
-    await r.sadd(AUTH_SET_KEY, str(user_id))
+    users = await _get_auth_users()
+    users.add(str(user_id))
+    await _save_auth_users(users)
 
 
 async def db_is_authenticated(user_id: int) -> bool:
-    r = await get_redis()
-    return bool(await r.sismember(AUTH_SET_KEY, str(user_id)))
+    users = await _get_auth_users()
+    return str(user_id) in users
 
 
 async def db_revoke_authentication(user_id: int) -> None:
-    r = await get_redis()
-    await r.srem(AUTH_SET_KEY, str(user_id))
+    users = await _get_auth_users()
+    users.discard(str(user_id))
+    await _save_auth_users(users)
 
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 
 async def db_get_settings() -> Dict[str, str]:
-    r = await get_redis()
+    r = get_redis()
     raw = await r.get(SETTINGS_KEY)
     if not raw:
         return dict(SETTINGS_DEFAULTS)
@@ -99,13 +112,12 @@ async def db_save_settings(**fields: Any) -> None:
         return
     current = await db_get_settings()
     current.update(updates)
-    r = await get_redis()
+    r = get_redis()
     await r.set(SETTINGS_KEY, json.dumps(current, ensure_ascii=False))
 
 
 async def db_seed_settings_from_json(path: str = "settings.json") -> None:
-    """Import settings.json into Redis on first run."""
-    r = await get_redis()
+    r = get_redis()
     if await r.exists(SETTINGS_KEY):
         return
     p = Path(path)
@@ -118,4 +130,4 @@ async def db_seed_settings_from_json(path: str = "settings.json") -> None:
         await db_save_settings(**SETTINGS_DEFAULTS)
         return
     await db_save_settings(**data)
-    log.info("Seeded Redis settings from %s", path)
+    log.info("Seeded settings from %s", path)
