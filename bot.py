@@ -17,7 +17,7 @@ from aiogram.types import BotCommand, Message
 
 from auth import AuthMiddleware, authenticate, is_authenticated, logout
 from config import BOT_PASSWORD, BOT_TOKEN, get_webhook_url, upstash_configured
-from database import close_redis, db_seed_settings_from_json, get_redis
+from database import db_seed_settings_from_json, get_redis
 from handlers import post, settings_panel
 from states import AuthFlow
 from upstash_storage import UpstashStorage
@@ -49,12 +49,15 @@ async def _create_storage() -> BaseStorage:
 
 
 async def reset_runtime() -> None:
-    """Reset per-request globals (safe with asyncio.run on Vercel)."""
-    global _dispatcher, _dispatcher_lock, _storage
-    _dispatcher = None
+    """
+    Reset only the asyncio lock after each Vercel request.
+
+    asyncio.run() creates a new event loop per request, so the lock must be
+    recreated. Keep the dispatcher and routers alive — module-level Router
+    instances can only be included once per process (warm instance).
+    """
+    global _dispatcher_lock
     _dispatcher_lock = None
-    _storage = None
-    await close_redis()
 
 
 # ── Bot commands ──────────────────────────────────────────────────────────────
