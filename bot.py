@@ -49,15 +49,8 @@ async def _create_storage() -> BaseStorage:
 
 
 async def reset_runtime() -> None:
-    """
-    Reset only the asyncio lock after each Vercel request.
-
-    asyncio.run() creates a new event loop per request, so the lock must be
-    recreated. Keep the dispatcher and routers alive — module-level Router
-    instances can only be included once per process (warm instance).
-    """
-    global _dispatcher_lock
-    _dispatcher_lock = None
+    """No-op on Vercel — vercel_app keeps one event loop + dispatcher per instance."""
+    return
 
 
 # ── Bot commands ──────────────────────────────────────────────────────────────

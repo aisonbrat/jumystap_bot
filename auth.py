@@ -55,14 +55,14 @@ class AuthMiddleware(BaseMiddleware):
         if isinstance(event, Message) and event.text and event.text.startswith("/logout"):
             return await handler(event, data)
 
+        if user and await _is_authenticated_cached(user.id, data):
+            return await handler(event, data)
+
         fsm: Any = data.get("state")
         if fsm is not None:
             current = await fsm.get_state()
             if current == AuthFlow.waiting_password.state:
                 return await handler(event, data)
-
-        if user and await _is_authenticated_cached(user.id, data):
-            return await handler(event, data)
 
         if isinstance(event, Message):
             await event.answer("🔐 Send /start and enter the password to use this bot.")

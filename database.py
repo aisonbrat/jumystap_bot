@@ -8,7 +8,7 @@ In Upstash console → your database → REST API tab, copy:
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 
 from upstash_redis.asyncio import Redis
 
@@ -17,6 +17,8 @@ from config import UPSTASH_REDIS_REST_TOKEN, UPSTASH_REDIS_REST_URL, upstash_con
 log = logging.getLogger(__name__)
 
 _redis: Optional[Redis] = None
+_auth_users_cache: Optional[frozenset] = None
+_settings_cache: Optional[Dict[str, str]] = None
 
 AUTH_SET_KEY = "bot:authenticated_users"
 SETTINGS_KEY = "bot:settings"
@@ -58,20 +60,39 @@ async def ping_redis() -> bool:
 
 # ── Auth (stored as JSON list — REST has no native sets in all plans) ────────
 
+def _invalidate_auth_cache() -> None:
+    global _auth_users_cache
+    _auth_users_cache = None
+
+
+def _invalidate_settings_cache() -> None:
+    global _settings_cache
+    _settings_cache = None
+
+
 async def _get_auth_users() -> set:
+    global _auth_users_cache
+    if _auth_users_cache is not None:
+        return set(_auth_users_cache)
+
     r = get_redis()
     raw = await r.get(AUTH_SET_KEY)
     if not raw:
-        return set()
-    try:
-        return set(json.loads(raw))
-    except json.JSONDecodeError:
-        return set()
+        users: Set[str] = set()
+    else:
+        try:
+            users = set(json.loads(raw))
+        except json.JSONDecodeError:
+            users = set()
+
+    _auth_users_cache = frozenset(users)
+    return set(users)
 
 
 async def _save_auth_users(users: set) -> None:
     r = get_redis()
     await r.set(AUTH_SET_KEY, json.dumps(list(users)))
+    _auth_users_cache = frozenset(users)
 
 
 async def db_authenticate(user_id: int) -> None:
@@ -94,15 +115,23 @@ async def db_revoke_authentication(user_id: int) -> None:
 # ── Settings ──────────────────────────────────────────────────────────────────
 
 async def db_get_settings() -> Dict[str, str]:
+    global _settings_cache
+    if _settings_cache is not None:
+        return dict(_settings_cache)
+
     r = get_redis()
     raw = await r.get(SETTINGS_KEY)
     if not raw:
-        return dict(SETTINGS_DEFAULTS)
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return dict(SETTINGS_DEFAULTS)
-    return {**SETTINGS_DEFAULTS, **data}
+        merged = dict(SETTINGS_DEFAULTS)
+    else:
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            data = {}
+        merged = {**SETTINGS_DEFAULTS, **data}
+
+    _settings_cache = merged
+    return dict(merged)
 
 
 async def db_save_settings(**fields: Any) -> None:
@@ -114,6 +143,8 @@ async def db_save_settings(**fields: Any) -> None:
     current.update(updates)
     r = get_redis()
     await r.set(SETTINGS_KEY, json.dumps(current, ensure_ascii=False))
+    global _settings_cache
+    _settings_cache = dict(current)
 
 
 async def db_seed_settings_from_json(path: str = "settings.json") -> None:
