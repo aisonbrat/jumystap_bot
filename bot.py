@@ -18,8 +18,9 @@ from aiogram.types import BotCommand, Message
 from auth import AuthMiddleware, authenticate, is_authenticated, logout
 from config import BOT_PASSWORD, BOT_TOKEN, get_webhook_url, upstash_configured
 from database import db_seed_settings_from_json, get_redis
+from handlers.post import discard_post
 from handlers import post, settings_panel
-from states import AuthFlow
+from states import AuthFlow, PostFlow
 from upstash_storage import UpstashStorage
 from web import start_web_server
 
@@ -105,7 +106,7 @@ async def _check_password(message: Message, state: FSMContext) -> None:
 
 # ── /logout ──────────────────────────────────────────────────────────────────
 
-async def _cmd_logout(message: Message, state: FSMContext) -> None:
+async def _cmd_logout(message: Message, state: FSMContext, bot: Bot) -> None:
     uid = message.from_user.id if message.from_user else None
     if not uid:
         return
@@ -114,12 +115,20 @@ async def _cmd_logout(message: Message, state: FSMContext) -> None:
         await message.answer("ℹ️ You are not logged in. Send /start to authenticate.")
         return
 
+    current = await state.get_state()
+    if current and current.startswith("PostFlow:"):
+        await discard_post(bot, message.chat.id, state)
+
     await logout(uid)
     await state.clear()
     log.info("User %d logged out.", uid)
     await message.answer(
         "👋 <b>Logged out.</b>\n\nSend /start when you want to sign in again.",
     )
+
+
+async def _cmd_cancel_idle(message: Message) -> None:
+    await message.answer("ℹ️ Nothing to cancel.")
 
 
 # ── Dispatcher wiring ────────────────────────────────────────────────────────
@@ -130,6 +139,7 @@ def _wire_dispatcher(dp: Dispatcher) -> None:
 
     dp.message.register(_cmd_start, Command("start"))
     dp.message.register(_cmd_logout, Command("logout"))
+    dp.message.register(_cmd_cancel_idle, Command("cancel"), StateFilter(None))
     dp.message.register(_check_password, StateFilter(AuthFlow.waiting_password), F.text)
 
     dp.include_router(settings_panel.router)

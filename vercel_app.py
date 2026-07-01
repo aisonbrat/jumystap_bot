@@ -78,6 +78,10 @@ def _get_header(headers: Dict[str, str], name: str) -> Optional[str]:
     return None
 
 
+_processed_updates: set[int] = set()
+_MAX_PROCESSED_UPDATES = 2000
+
+
 async def process_webhook(
     body: bytes,
     headers: Optional[Dict[str, str]] = None,
@@ -92,9 +96,17 @@ async def process_webhook(
     started = time.monotonic()
     status, response = 200, {"ok": True}
     try:
-        dp = await get_dispatcher()
         payload = json.loads(body.decode("utf-8"))
-        update_id = payload.get("update_id", "?")
+        update_id = payload.get("update_id")
+        if isinstance(update_id, int):
+            if update_id in _processed_updates:
+                log.info("Skipping duplicate update %s", update_id)
+                return status, response
+            _processed_updates.add(update_id)
+            if len(_processed_updates) > _MAX_PROCESSED_UPDATES:
+                _processed_updates.clear()
+
+        dp = await get_dispatcher()
 
         async with create_bot() as bot:
             update = Update.model_validate(payload, context={"bot": bot})

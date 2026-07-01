@@ -40,6 +40,15 @@ log = logging.getLogger(__name__)
 
 router = Router(name="post")
 
+
+@router.callback_query(F.data.startswith("ctrl:"))
+async def on_stale_control_panel(query: CallbackQuery) -> None:
+    """Fallback for outdated control panels (registered first → lowest priority)."""
+    await query.answer(
+        "This panel is outdated. Send /cancel, then a new vacancy.",
+        show_alert=True,
+    )
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 CTRL_HEADER = "📋 <b>Post Control Panel:</b>"
@@ -49,6 +58,32 @@ _REQUIRED_POST_KEYS = ("contacts", "html_text", "preview_msg_id", "ctrl_msg_id")
 
 def _has_post_data(data: dict) -> bool:
     return all(k in data for k in _REQUIRED_POST_KEYS)
+
+
+async def discard_post(bot: Bot, chat_id: int, state: FSMContext) -> None:
+    """Delete preview/control messages and clear post FSM state."""
+    data = await state.get_data()
+    for msg_id in (data.get("preview_msg_id"), data.get("ctrl_msg_id")):
+        if msg_id:
+            try:
+                await bot.delete_message(chat_id, msg_id)
+            except Exception:
+                pass
+    await state.clear()
+
+
+async def _require_active_panel(query: CallbackQuery, data: dict) -> bool:
+    """Reject clicks on outdated control panels (e.g. after /cancel or new post)."""
+    if not _has_post_data(data):
+        await query.answer("Session expired. Send a new vacancy.", show_alert=True)
+        return False
+    if query.message.message_id != data.get("ctrl_msg_id"):
+        await query.answer(
+            "This panel is outdated. Send /cancel, then a new vacancy.",
+            show_alert=True,
+        )
+        return False
+    return True
 
 
 def _build_full_html(html_text: str, footer: str) -> str:
@@ -162,8 +197,16 @@ async def _restore_ctrl_panel(bot: Bot, chat_id: int, data: dict) -> None:
 
 # ── Entry: admin sends raw post text ─────────────────────────────────────────
 
-@router.message(StateFilter(None), F.text)
+@router.message(StateFilter(None), F.text, ~F.text.startswith("/"))
 async def handle_new_post(message: Message, state: FSMContext, bot: Bot) -> None:
+    raw = (message.text or "").strip()
+    if len(raw) < 20:
+        await message.answer(
+            "⚠️ Message too short for a vacancy post. Send the full job text.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
     settings = await store.get()
 
     # message.html_text preserves bold/italic/underline/mono from Telegram entities
@@ -206,7 +249,10 @@ async def guard_reviewing_text(message: Message) -> None:
 # ── Control panel: Publish ────────────────────────────────────────────────────
 
 @router.callback_query(PostFlow.reviewing, F.data == "ctrl:publish")
-async def on_publish(query: CallbackQuery) -> None:
+async def on_publish(query: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    if not await _require_active_panel(query, data):
+        return
     await query.answer()
     await safe_edit_text(
         query.message,
@@ -219,8 +265,7 @@ async def on_publish(query: CallbackQuery) -> None:
 @router.callback_query(PostFlow.reviewing, F.data == "ctrl:confirm_yes")
 async def on_confirm_yes(query: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     data = await state.get_data()
-    if not _has_post_data(data):
-        await query.answer("Session expired. Send a new post.", show_alert=True)
+    if not await _require_active_panel(query, data):
         return
     if data.get("publishing"):
         await query.answer("Already publishing…", show_alert=False)
@@ -295,10 +340,10 @@ async def on_confirm_yes(query: CallbackQuery, state: FSMContext, bot: Bot) -> N
 
 @router.callback_query(PostFlow.reviewing, F.data == "ctrl:confirm_no")
 async def on_confirm_no(query: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    await query.answer()
     data = await state.get_data()
-    if not _has_post_data(data):
+    if not await _require_active_panel(query, data):
         return
+    await query.answer()
     await _restore_ctrl_panel(bot, query.message.chat.id, data)
 
 
@@ -306,6 +351,9 @@ async def on_confirm_no(query: CallbackQuery, state: FSMContext, bot: Bot) -> No
 
 @router.callback_query(PostFlow.reviewing, F.data == "ctrl:add_photo")
 async def on_add_photo_prompt(query: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    if not await _require_active_panel(query, data):
+        return
     await query.answer()
     await state.set_state(PostFlow.waiting_photo)
     await safe_edit_text(
@@ -380,10 +428,10 @@ async def on_waiting_photo_wrong(message: Message) -> None:
 
 @router.callback_query(PostFlow.reviewing, F.data == "ctrl:toggle_preview")
 async def on_toggle_preview(query: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    await query.answer()
     data = await state.get_data()
-    if not _has_post_data(data):
+    if not await _require_active_panel(query, data):
         return
+    await query.answer()
     data["link_preview_disabled"] = not data["link_preview_disabled"]
     await state.set_data(data)
     await _refresh_preview(bot, query.message.chat.id, state)
@@ -393,10 +441,10 @@ async def on_toggle_preview(query: CallbackQuery, state: FSMContext, bot: Bot) -
 
 @router.callback_query(PostFlow.reviewing, F.data == "ctrl:delete_buttons")
 async def on_delete_buttons(query: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    await query.answer("Contact buttons removed", show_alert=False)
     data = await state.get_data()
-    if not _has_post_data(data):
+    if not await _require_active_panel(query, data):
         return
+    await query.answer("Contact buttons removed", show_alert=False)
     data["buttons_visible"] = False
     await state.set_data(data)
     await _refresh_preview(bot, query.message.chat.id, state)
@@ -406,10 +454,10 @@ async def on_delete_buttons(query: CallbackQuery, state: FSMContext, bot: Bot) -
 
 @router.callback_query(PostFlow.reviewing, F.data == "ctrl:edit_buttons")
 async def on_edit_buttons_prompt(query: CallbackQuery, state: FSMContext) -> None:
-    await query.answer()
     data = await state.get_data()
-    if not _has_post_data(data):
+    if not await _require_active_panel(query, data):
         return
+    await query.answer()
     c = parser.contacts_from_dict(data["contacts"])
 
     text = (
@@ -429,11 +477,8 @@ async def on_edit_buttons_prompt(query: CallbackQuery, state: FSMContext) -> Non
     await safe_edit_text(query.message, text, parse_mode=ParseMode.HTML)
 
 
-@router.message(PostFlow.editing_buttons, F.text)
+@router.message(PostFlow.editing_buttons, F.text, ~F.text.startswith("/"))
 async def on_edit_buttons_input(message: Message, state: FSMContext, bot: Bot) -> None:
-    if message.text.strip().startswith("/"):
-        return  # let /cancel be handled below
-
     data = await state.get_data()
     if not _has_post_data(data):
         await message.answer("Session expired. Send a new post.")
@@ -486,26 +531,9 @@ async def on_edit_buttons_input(message: Message, state: FSMContext, bot: Bot) -
 
 @router.message(Command("cancel"), StateFilter(PostFlow))
 async def on_cancel(message: Message, state: FSMContext, bot: Bot) -> None:
-    current = await state.get_state()
-    data = await state.get_data()
-
-    if current in (PostFlow.waiting_photo, PostFlow.editing_buttons):
-        # Return to reviewing: restore ctrl panel, keep preview intact
-        await state.set_state(PostFlow.reviewing)
-        await _restore_ctrl_panel(bot, message.chat.id, data)
-        try:
-            await message.delete()
-        except Exception:
-            pass
-        return
-
-    # Full abort: delete preview and control messages
-    for msg_id in (data.get("preview_msg_id"), data.get("ctrl_msg_id")):
-        if msg_id:
-            try:
-                await bot.delete_message(message.chat.id, msg_id)
-            except Exception:
-                pass
-
-    await state.clear()
+    await discard_post(bot, message.chat.id, state)
+    try:
+        await message.delete()
+    except Exception:
+        pass
     await message.answer("❌ <b>Post cancelled.</b>", parse_mode=ParseMode.HTML)
